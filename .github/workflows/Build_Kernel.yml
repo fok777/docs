@@ -1,0 +1,135 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_device:
+        description: 'Target device'
+        required: true
+        default: 'alioth'
+        type: choice
+        options:
+          - 'alioth'
+          - 'apollo'
+          - 'cas'
+          - 'cmi'
+          - 'dagu'
+          - 'elish'
+          - 'enuma'
+          - 'lmi'
+          - 'munch'
+          - 'pipa'
+          - 'psyche'
+          - 'umi'
+
+      system_version:
+        description: 'Target System'
+        required: true
+        type: choice
+        default: 'miui'
+        options:
+          - 'aosp'
+          - 'miui'
+
+      kernelsu_version:
+        description: 'KernelSU Version'
+        required: true
+        type: choice
+        default: 'sukisu'
+        options:
+          - 'sukisu'
+          - 'resukisu'
+          - 'rksu'
+          - 'noksu'
+
+      enable_kpm:
+        description: 'Enable KPM (only SukiSU)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex gawk \
+            git gnupg gperf imagemagick libncurses-dev \
+            lib32readline-dev lib32z1-dev liblz4-tool \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python3 \
+            dwarves libelf-dev
+
+      - name: Setup ZyC-Clang 16 Toolchain
+        run: |
+          mkdir -p $HOME/zyc-clang
+          cd $HOME/zyc-clang
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
+          tar -zxvf Clang-16.0.6-20260510.tar.gz
+
+      - name: Cache ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache_mikernel
+          key: ${{ runner.os }}-ccache-${{ github.event.inputs.target_device }}-${{ github.event.inputs.system_version }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Build Kernel
+        id: build
+        continue-on-error: true
+        run: |
+          # 日志同时落盘:GitHub 的 job log 接口对这个 token 返回 403,
+          # 只能自己 tee 出来再推到分支上看。
+          exec > >(tee /tmp/build.log) 2>&1
+          export TOOLCHAIN_PATH=$HOME/zyc-clang/bin
+          export PATH="$TOOLCHAIN_PATH:$PATH"
+          export CCACHE_DIR="$HOME/.cache/ccache_mikernel"
+          chmod +x build_kernel.sh
+          ARGS="${{ github.event.inputs.target_device }} ${{ github.event.inputs.kernelsu_version }} ${{ github.event.inputs.system_version }}"
+          echo "Executing: ./build_kernel.sh $ARGS"
+          ./build_kernel.sh $ARGS
+
+      - name: Upload Kernel
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Kernel_${{ github.event.inputs.target_device }}_${{ github.event.inputs.system_version }}_${{ github.event.inputs.kernelsu_version }}
+          path: ./*.zip
+          compression-level: 0
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log
+          path: /tmp/build.log
+          compression-level: 0
+
+      - name: Publish build log
+        if: always()
+        continue-on-error: true
+        run: |
+          # GitHub 的 job log / artifact 下载接口对这个 token 都返回 403,
+          # 只能把日志推到一个分支上再读。
+          git config user.name "fok777"
+          git config user.email "fok777@users.noreply.github.com"
+          git checkout --orphan logs-tmp
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p logs
+          cp /tmp/build.log logs/build.log 2>/dev/null || true
+          git add -f logs/
+          git commit -q -m "logs: build ${{ github.run_id }}"
+          git push -f origin logs-tmp:logs
+
+      - name: Fail if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
